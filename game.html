@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Comet Catcher — a tiny neon arcade game</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #07070f; height: 100%; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; font-family: monospace; }
+  canvas { width: min(96vw, calc(96vh * 16 / 9)); height: auto; display: block;
+           border: 2px solid #23233a; border-radius: 12px;
+           box-shadow: 0 0 60px rgba(120, 80, 255, 0.35); background: #0b0b18; }
+</style>
+</head>
+<body>
+<canvas id="game" width="960" height="540"></canvas>
+<script>
+'use strict';
+/* Comet Catcher — built from one prompt.
+   Move the ship, catch stars, dodge asteroids. 3 lives, speed ramps with score. */
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+// Seeded random for demo mode (?demo=1): same run every time, so the video
+// can show a real, repeatable game. Normal play uses Math.random.
+const params = new URLSearchParams(location.search);
+const DEMO = params.get('demo') === '1';
+let seed = 7;
+function rand() {
+  if (!DEMO) return Math.random();
+  seed = (seed * 1664525 + 1013904223) >>> 0;
+  return seed / 4294967296;
+}
+
+const game = {
+  state: 'start',          // 'start' | 'playing' | 'over'
+  score: 0,
+  best: 0,
+  lives: 3,
+  level: 1,
+  time: 0,
+  ship: { x: W / 2, y: H - 56, w: 46, h: 34, speed: 430 },
+  keys: { left: false, right: false },
+  mouseX: null,
+  stars: [],               // falling stars to catch
+  rocks: [],               // falling asteroids to dodge
+  parts: [],               // spark particles
+  field: [],               // background starfield
+  spawnStar: 0,
+  spawnRock: 0,
+  invuln: 0,               // seconds of post-hit invulnerability
+  shake: 0,
+  flash: 0,
+};
+
+try { game.best = Number(localStorage.getItem('comet-catcher-best') || 0); } catch (e) { /* no storage */ }
+
+for (let i = 0; i < 90; i++) {
+  game.field.push({ x: rand() * W, y: rand() * H, r: rand() * 1.6 + 0.4, p: rand() * Math.PI * 2 });
+}
+
+function levelOf(score) { return Math.floor(score / 100) + 1; }
+
+function startGame() {
+  game.state = 'playing';
+  game.score = 0; game.lives = 3; game.level = 1; game.time = 0;
+  game.stars = []; game.rocks = []; game.parts = [];
+  game.spawnStar = 0; game.spawnRock = 0; game.invuln = 0; game.shake = 0;
+  game.ship.x = W / 2;
+}
+
+function spawnStar() {
+  game.stars.push({ x: 30 + rand() * (W - 60), y: -20, r: 13,
+                    vy: 130 + rand() * 90 + game.level * 16, spin: rand() * Math.PI * 2 });
+}
+function spawnRock() {
+  game.rocks.push({ x: 30 + rand() * (W - 60), y: -30, r: 16 + rand() * 14,
+                    vy: 150 + rand() * 110 + game.level * 18,
+                    vx: (rand() - 0.5) * 40, rot: rand() * Math.PI * 2, vr: (rand() - 0.5) * 2 });
+}
+function burst(x, y, color, n) {
+  for (let i = 0; i < n; i++) {
+    const a = rand() * Math.PI * 2, s = 60 + rand() * 160;
+    game.parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 40,
+                      life: 0.5 + rand() * 0.3, max: 0.8, color, r: 2 + rand() * 2.5 });
+  }
+}
+function gameOver() {
+  game.state = 'over';
+  if (game.score > game.best) {
+    game.best = game.score;
+    try { localStorage.setItem('comet-catcher-best', String(game.best)); } catch (e) { /* no storage */ }
+  }
+}
+
+function update(dt) {
+  game.time += dt;
+  if (game.state !== 'playing') return;
+  game.level = levelOf(game.score);
+  if (game.invuln > 0) game.invuln -= dt;
+  if (game.shake > 0) game.shake -= dt;
+  if (game.flash > 0) game.flash -= dt;
+
+  // Ship movement: keys, or mouse, or demo autopilot.
+  const s = game.ship;
+  if (DEMO) autopilot(dt);
+  else if (game.mouseX !== null) {
+    const dx = game.mouseX - s.x;
+    s.x += Math.max(-s.speed * dt, Math.min(s.speed * dt, dx));
+  } else {
+    if (game.keys.left) s.x -= s.speed * dt;
+    if (game.keys.right) s.x += s.speed * dt;
+  }
+  s.x = Math.max(s.w / 2 + 6, Math.min(W - s.w / 2 - 6, s.x));
+
+  // Spawning gets denser and faster as the level rises.
+  game.spawnStar -= dt;
+  if (game.spawnStar <= 0) { spawnStar(); game.spawnStar = Math.max(0.28, 0.62 - game.level * 0.04); }
+  game.spawnRock -= dt;
+  if (game.spawnRock <= 0) { spawnRock(); game.spawnRock = Math.max(0.55, 1.25 - game.level * 0.08); }
+
+  // Stars: fall, spin, catch.
+  for (let i = game.stars.length - 1; i >= 0; i--) {
+    const st = game.stars[i];
+    st.y += st.vy * dt; st.spin += dt * 3;
+    const dx = st.x - s.x, dy = st.y - s.y;
+    if (Math.abs(dx) < s.w / 2 + st.r && Math.abs(dy) < s.h / 2 + st.r) {
+      game.score += 10;
+      burst(st.x, st.y, '#ffd94a', 10);
+      game.stars.splice(i, 1);
+    } else if (st.y > H + 30) game.stars.splice(i, 1);
+  }
+
+  // Rocks: fall, drift, hit.
+  for (let i = game.rocks.length - 1; i >= 0; i--) {
+    const r = game.rocks[i];
+    r.y += r.vy * dt; r.x += r.vx * dt; r.rot += r.vr * dt;
+    const dx = r.x - s.x, dy = r.y - s.y;
+    const hit = Math.abs(dx) < s.w / 2 + r.r * 0.7 && Math.abs(dy) < s.h / 2 + r.r * 0.7;
+    if (hit && game.invuln <= 0) {
+      game.lives -= 1; game.invuln = 1.6; game.shake = 0.35; game.flash = 0.25;
+      burst(s.x, s.y, '#ff5a5a', 16);
+      game.rocks.splice(i, 1);
+      if (game.lives <= 0) gameOver();
+    } else if (r.y > H + 40 || r.x < -40 || r.x > W + 40) game.rocks.splice(i, 1);
+  }
+
+  // Particles.
+  for (let i = game.parts.length - 1; i >= 0; i--) {
+    const p = game.parts[i];
+    p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 260 * dt; p.life -= dt;
+    if (p.life <= 0) game.parts.splice(i, 1);
+  }
+}
+
+// Demo autopilot: chase the lowest star, swerve away from a rock overhead.
+function autopilot(dt) {
+  const s = game.ship;
+  let target = null, bestY = -1;
+  for (const st of game.stars) if (st.y > bestY && st.y < s.y) { bestY = st.y; target = st.x; }
+  let danger = 0;
+  for (const r of game.rocks) {
+    if (r.y < s.y && r.y > s.y - 190 && Math.abs(r.x - s.x) < 90) danger += (r.x >= s.x ? -1 : 1);
+  }
+  let tx = target !== null ? target : W / 2;
+  if (danger !== 0) tx = s.x + danger * 130;
+  const dx = tx - s.x;
+  s.x += Math.max(-s.speed * dt, Math.min(s.speed * dt, dx));
+}
+
+// ---- drawing ----
+function drawStar(cx, cy, r, rot) {
+  ctx.beginPath();
+  for (let i = 0; i < 8; i++) {
+    const a = rot + i * Math.PI / 4;
+    const rr = i % 2 === 0 ? r : r * 0.45;
+    const x = cx + Math.cos(a) * rr, y = cy + Math.sin(a) * rr;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+}
+function drawShip() {
+  const s = game.ship;
+  const blink = game.invuln > 0 && Math.floor(game.time * 12) % 2 === 0;
+  if (blink) return;
+  // Flame.
+  const fl = 12 + Math.sin(game.time * 30) * 4;
+  ctx.fillStyle = '#ff9a3d';
+  ctx.beginPath();
+  ctx.moveTo(s.x - 7, s.y + s.h / 2);
+  ctx.lineTo(s.x + 7, s.y + s.h / 2);
+  ctx.lineTo(s.x, s.y + s.h / 2 + fl);
+  ctx.closePath(); ctx.fill();
+  // Hull.
+  ctx.fillStyle = '#7dd7ff';
+  ctx.beginPath();
+  ctx.moveTo(s.x, s.y - s.h / 2);
+  ctx.lineTo(s.x + s.w / 2, s.y + s.h / 2);
+  ctx.lineTo(s.x - s.w / 2, s.y + s.h / 2);
+  ctx.closePath(); ctx.fill();
+  // Cockpit.
+  ctx.fillStyle = '#123a5c';
+  ctx.beginPath(); ctx.arc(s.x, s.y - 2, 7, 0, Math.PI * 2); ctx.fill();
+  // Wing lights.
+  ctx.fillStyle = '#ff5ad0';
+  ctx.beginPath(); ctx.arc(s.x - s.w / 2 + 4, s.y + s.h / 2 - 4, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(s.x + s.w / 2 - 4, s.y + s.h / 2 - 4, 3, 0, Math.PI * 2); ctx.fill();
+}
+function draw() {
+  ctx.save();
+  if (game.shake > 0) ctx.translate((rand() - 0.5) * 10 * game.shake * 3, (rand() - 0.5) * 10 * game.shake * 3);
+  // Sky.
+  ctx.fillStyle = '#0b0b18';
+  ctx.fillRect(-20, -20, W + 40, H + 40);
+  // Starfield.
+  for (const f of game.field) {
+    ctx.globalAlpha = 0.35 + 0.65 * Math.abs(Math.sin(game.time * 1.5 + f.p));
+    ctx.fillStyle = '#cdd8ff';
+    ctx.fillRect(f.x, f.y, f.r, f.r);
+  }
+  ctx.globalAlpha = 1;
+  // Catch line glow at the bottom.
+  ctx.fillStyle = '#1c1c33';
+  ctx.fillRect(0, H - 14, W, 14);
+
+  if (game.state === 'start') {
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ffd94a';
+    ctx.font = 'bold 64px monospace';
+    ctx.fillText('COMET CATCHER', W / 2, H / 2 - 90);
+    ctx.fillStyle = '#7dd7ff';
+    ctx.font = 'bold 24px monospace';
+    ctx.fillText('catch the stars  •  dodge the rocks', W / 2, H / 2 - 30);
+    ctx.fillStyle = '#e8e8f2';
+    ctx.font = '20px monospace';
+    ctx.fillText('← → or mouse to move', W / 2, H / 2 + 20);
+    if (Math.floor(game.time * 2) % 2 === 0) {
+      ctx.fillStyle = '#ff5ad0';
+      ctx.font = 'bold 26px monospace';
+      ctx.fillText('press SPACE or click to start', W / 2, H / 2 + 80);
+    }
+    ctx.restore();
+    return;
+  }
+
+  // Stars.
+  for (const st of game.stars) {
+    ctx.fillStyle = '#ffd94a';
+    drawStar(st.x, st.y, st.r, st.spin);
+    ctx.fill();
+    ctx.fillStyle = '#fff6c9';
+    drawStar(st.x, st.y, st.r * 0.45, -st.spin);
+    ctx.fill();
+  }
+  // Rocks.
+  for (const r of game.rocks) {
+    ctx.save();
+    ctx.translate(r.x, r.y); ctx.rotate(r.rot);
+    ctx.fillStyle = '#8a7f8d';
+    ctx.beginPath(); ctx.arc(0, 0, r.r, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#5d5560';
+    ctx.beginPath(); ctx.arc(-r.r * 0.3, -r.r * 0.2, r.r * 0.28, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(r.r * 0.35, r.r * 0.3, r.r * 0.2, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+  // Particles.
+  for (const p of game.parts) {
+    ctx.globalAlpha = Math.max(0, p.life / p.max);
+    ctx.fillStyle = p.color;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  drawShip();
+
+  // HUD.
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 26px monospace';
+  ctx.fillText('SCORE ' + game.score, 18, 14);
+  ctx.fillStyle = '#9d8cff';
+  ctx.font = 'bold 20px monospace';
+  ctx.fillText('LEVEL ' + game.level, 18, 48);
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#ff5a7a';
+  ctx.font = 'bold 26px monospace';
+  ctx.fillText('♥'.repeat(Math.max(0, game.lives)), W - 18, 14);
+
+  if (game.flash > 0) {
+    ctx.globalAlpha = game.flash * 1.6;
+    ctx.fillStyle = '#ff2e4d';
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
+  }
+
+  if (game.state === 'over') {
+    ctx.fillStyle = 'rgba(7, 7, 15, 0.72)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ff5a7a';
+    ctx.font = 'bold 58px monospace';
+    ctx.fillText('GAME OVER', W / 2, H / 2 - 70);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 30px monospace';
+    ctx.fillText('SCORE ' + game.score + '   •   BEST ' + game.best, W / 2, H / 2);
+    if (Math.floor(game.time * 2) % 2 === 0) {
+      ctx.fillStyle = '#ffd94a';
+      ctx.font = 'bold 24px monospace';
+      ctx.fillText('press R to play again', W / 2, H / 2 + 60);
+    }
+  }
+  ctx.restore();
+}
+
+// ---- input ----
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft') game.keys.left = true;
+  if (e.key === 'ArrowRight') game.keys.right = true;
+  if (e.key === ' ' && game.state === 'start') { e.preventDefault(); startGame(); }
+  if ((e.key === 'r' || e.key === 'R') && game.state === 'over') startGame();
+});
+window.addEventListener('keyup', (e) => {
+  if (e.key === 'ArrowLeft') game.keys.left = false;
+  if (e.key === 'ArrowRight') game.keys.right = false;
+});
+canvas.addEventListener('mousemove', (e) => {
+  const r = canvas.getBoundingClientRect();
+  game.mouseX = (e.clientX - r.left) * (W / r.width);
+});
+canvas.addEventListener('mousedown', () => {
+  if (game.state === 'start') startGame();
+});
+
+// Handle for the headless runner that records real gameplay for the video.
+window.__COMET = game;
+
+// ---- main loop ----
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000 || 0.016);
+  last = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+if (DEMO) startGame();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

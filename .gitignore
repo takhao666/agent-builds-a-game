@@ -1,0 +1,7 @@
+frames/
+assets/
+check/
+*.mp4
+*.py
+*.mjs
+frames.jsonl
