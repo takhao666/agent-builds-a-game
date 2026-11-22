@@ -53,6 +53,7 @@ const game = {
   invuln: 0,               // seconds of post-hit invulnerability
   shake: 0,
   flash: 0,
+  newBest: false,          // true when the last run set a new best score
 };
 
 try { game.best = Number(localStorage.getItem('comet-catcher-best') || 0); } catch (e) { /* no storage */ }
@@ -68,6 +69,7 @@ function startGame() {
   game.score = 0; game.lives = 3; game.level = 1; game.time = 0;
   game.stars = []; game.rocks = []; game.parts = [];
   game.spawnStar = 0; game.spawnRock = 0; game.invuln = 0; game.shake = 0;
+  game.newBest = false;
   game.ship.x = W / 2;
 }
 
@@ -89,8 +91,10 @@ function burst(x, y, color, n) {
 }
 function gameOver() {
   game.state = 'over';
+  game.newBest = false;
   if (game.score > game.best) {
     game.best = game.score;
+    game.newBest = true;
     try { localStorage.setItem('comet-catcher-best', String(game.best)); } catch (e) { /* no storage */ }
   }
 }
@@ -305,10 +309,15 @@ function draw() {
     ctx.fillStyle = '#ffffff';
     ctx.font = 'bold 30px monospace';
     ctx.fillText('SCORE ' + game.score + '   •   BEST ' + game.best, W / 2, H / 2);
+    if (game.newBest) {
+      ctx.fillStyle = '#ffd94a';
+      ctx.font = 'bold 28px monospace';
+      ctx.fillText('★ NEW BEST! ★', W / 2, H / 2 + 52);
+    }
     if (Math.floor(game.time * 2) % 2 === 0) {
       ctx.fillStyle = '#ffd94a';
       ctx.font = 'bold 24px monospace';
-      ctx.fillText('press R to play again', W / 2, H / 2 + 60);
+      ctx.fillText('press R to play again', W / 2, H / 2 + (game.newBest ? 104 : 60));
     }
   }
   ctx.restore();
